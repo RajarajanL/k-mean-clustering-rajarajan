@@ -1,0 +1,205 @@
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Random;
+import mpi.*;
+
+public class ClusterPoints {
+
+	public ClusterPoints() {
+
+	}
+
+	public ClusterPoints(ArrayList<Point> points, String outputFile, int numCluster)
+			throws Exception {
+//		System.out.println("Points"+points);
+//		System.out.println("Output Files"+outputFile);
+//		System.out.println("NumCluster"+numCluster);
+		// get the min, max of x & y
+		double x, y;
+		for (Point point : points) {
+			x = point.getX();
+			y = point.getY();
+			if (x < minX)
+				minX = x;
+			if (x > maxX)
+				maxX = x;
+			if (y < minY)
+				minY = y;
+			if (y > maxY)
+				maxY = y;
+		}
+
+		// randomly init centroids
+		centroids = new Point[numCluster];
+		int numCentroids = centroids.length;
+		double randomX, randomY;
+		rangeX = maxX - minX;
+		rangeY = maxY - minY;
+		for (int i = 0; i < numCentroids; i++) {
+			randomX = minX + random.nextDouble() * rangeX;
+			randomY = minY + random.nextDouble() * rangeY;
+			centroids[i] = new Point(randomX, randomY);
+		}
+
+		// start interations
+		int numPoints = points.size();
+		clusters = new ArrayList[numCluster];
+
+		int myRank;
+		int senderRank;
+		int dest;
+		int size;
+
+		myRank = MPI.COMM_WORLD.Rank();
+		size = MPI.COMM_WORLD.Size();
+
+		for (int i = 0; i < numInterations; i++) {
+			for (int j = 0; j < numCluster; j++)
+				clusters[j] = new ArrayList<Point>();
+
+			int numPointsSlave = numPoints / (size - 1);
+			int[] point2clusterMaster = new int[numPoints];
+			int[] point2clusterSlave = new int[numPointsSlave];
+			int[] startSignal = new int[1];
+			
+			// slave processes here
+			if (myRank != 0) {
+				// get centroids from master
+				MPI.COMM_WORLD.Recv(centroids, 0, numCentroids, MPI.OBJECT, 0, 0);
+
+				// calculate the nearest centroid for every point in slave's range
+				for (int j = 0; j < numPointsSlave; j++) {
+					point2clusterSlave[j] = getNearestCentroid(points
+							.get(((myRank - 1) * numPointsSlave) + j));
+				}
+
+				// send the result back to master
+				MPI.COMM_WORLD.Send(point2clusterSlave, 0, numPointsSlave, MPI.INT, 0, 100);
+
+				
+				// get a cluster of points from master and recalculate the centroid
+				MPI.COMM_WORLD.Recv(oneCluster, 0, 1, MPI.OBJECT, 0, 1);
+				oneCentroid[0] = recalculateCentroid(oneCluster[0]);
+				MPI.COMM_WORLD.Send(oneCentroid, 0, 1, MPI.OBJECT, 0, 99);
+
+			} 
+			// master process here
+			else {
+				// send centroids to every slave
+				for (senderRank = 1; senderRank < size; senderRank++) {
+					MPI.COMM_WORLD.Send(centroids, 0, numCentroids, MPI.OBJECT, senderRank, 0);
+				}
+
+				// get clustering result and glue them together
+				for (senderRank = 1; senderRank < size; senderRank++) {
+
+					Status status = MPI.COMM_WORLD.Recv(point2clusterSlave, 0, numPointsSlave, MPI.INT,
+							MPI.ANY_SOURCE, 100);
+
+					for (int k = 0; k < numPointsSlave; k++) {
+						point2clusterMaster[((status.source - 1) * numPointsSlave) + k] = point2clusterSlave[k];
+					}
+
+				}
+
+				for (int k = 0; k < numPoints; k++) {
+//					System.out.println("K:"+k);
+//					System.out.println("PointsCluster:"+point2clusterMaster[k]);
+//					System.out.println("Cluster:"+String.valueOf(clusters));
+//					System.out.println("points:"+String.valueOf(points.get(k)));
+					clusters[point2clusterMaster[k]].add(points.get(k));
+				}
+				
+				// parallel recalculate centroids
+				for (senderRank = 1; senderRank < size; senderRank++) {
+					oneCluster[0] = clusters[senderRank - 1];
+					MPI.COMM_WORLD.Send(oneCluster, 0, 1, MPI.OBJECT, senderRank, 1);
+				}
+				
+				for (senderRank = 1; senderRank < size; senderRank++) {
+					Status status = MPI.COMM_WORLD.Recv(oneCentroid, 0, 1, MPI.OBJECT, MPI.ANY_SOURCE, 99);
+					centroids[status.source - 1] = oneCentroid[0];
+				}
+
+				
+			}
+
+		}
+
+		// write the result into the output file
+		FileWriter writer = new FileWriter(outputFile);
+		for (int i = 0; i < numCluster; i++) {
+			for (Point point : clusters[i]) {
+				writer.append("" + point.getX());
+				writer.append(',');
+				writer.append("" + point.getY());
+				writer.append(',');
+				writer.append("" + i);
+				writer.append('\n');
+				writer.flush();
+			}
+		}
+		writer.close();
+
+	}
+
+	private int getNearestCentroid(Point point) {
+		int index = -1;
+		int len = this.centroids.length;
+		double minDistance = Double.MAX_VALUE;
+		double distance;
+
+		for (int i = 0; i < len; i++) {
+			distance = Math.pow((point.getX() - centroids[i].getX()), 2)
+					+ Math.pow((point.getY() - centroids[i].getY()), 2);
+			if (distance < minDistance) {
+				minDistance = distance;
+				index = i;
+			}
+		}
+
+		return index;
+	}
+
+	private Point recalculateCentroid(ArrayList<Point> points) {
+		int numPoints = points.size();
+		Point centroid = null;
+
+		if (numPoints == 0) {
+			double randomX, randomY;
+			randomX = minX + random.nextDouble() * rangeX;
+			randomY = minY + random.nextDouble() * rangeY;
+			centroid = new Point(randomX, randomY);
+		} else {
+			double sumX = 0;
+			double sumY = 0;
+			for (Point point : points) {
+				sumX += point.getX();
+				sumY += point.getY();
+			}
+
+			centroid = new Point(sumX / numPoints, sumY / numPoints);
+		}
+		return centroid;
+	}
+
+	private Random random = new Random();
+
+	private double minX = Double.MAX_VALUE;
+	private double maxX = Double.MIN_VALUE;
+	private double minY = Double.MAX_VALUE;
+	private double maxY = Double.MIN_VALUE;
+	private double rangeX = 0.0;
+	private double rangeY = 0.0;
+
+	@SuppressWarnings("unused")
+	private int numCluster = 2;
+	private int numInterations = 100;
+	private Point[] centroids;
+	private Point[] oneCentroid = new Point[1];
+	private ArrayList<Point>[] clusters;
+	@SuppressWarnings("unchecked")
+	private ArrayList<Point>[] oneCluster = new ArrayList[1];
+
+}
